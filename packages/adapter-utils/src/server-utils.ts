@@ -361,6 +361,7 @@ type PaperclipWakePayload = {
   reason: string | null;
   issue: PaperclipWakeIssue | null;
   checkedOutByHarness: boolean;
+  blockedIssueInteraction: boolean;
   dependencyBlockedInteraction: boolean;
   treeHoldInteraction: boolean;
   activeTreeHold: PaperclipWakeTreeHoldSummary | null;
@@ -572,6 +573,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     reason: asString(payload.reason, "").trim() || null,
     issue: normalizePaperclipWakeIssue(payload.issue),
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
+    blockedIssueInteraction: asBoolean(payload.blockedIssueInteraction, false),
     dependencyBlockedInteraction: asBoolean(payload.dependencyBlockedInteraction, false),
     treeHoldInteraction: asBoolean(payload.treeHoldInteraction, false),
     activeTreeHold,
@@ -689,6 +691,11 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.checkedOutByHarness) {
     lines.push("- checkout: already claimed by the harness for this run");
+  }
+  if (normalized.blockedIssueInteraction) {
+    lines.push("- blocked issue interaction: yes");
+    lines.push("- checkout: do not checkout this issue unless explicit resume or checkout was requested");
+    lines.push("- execution scope: respond or triage the human comment; do not treat blocked deliverable work as unblocked");
   }
   if (normalized.dependencyBlockedInteraction) {
     lines.push("- dependency-blocked interaction: yes");

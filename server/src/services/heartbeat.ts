@@ -1617,6 +1617,21 @@ function allowsIssueInteractionWake(
   return Boolean(deriveCommentId(contextSnapshot, null));
 }
 
+function hasExplicitResumeIntent(contextSnapshot: Record<string, unknown> | null | undefined) {
+  return contextSnapshot?.resumeIntent === true || contextSnapshot?.followUpRequested === true;
+}
+
+function isBlockedIssueInteractionOnlyWake(input: {
+  contextSnapshot: Record<string, unknown> | null | undefined;
+  issueStatus: string | null | undefined;
+}) {
+  return (
+    input.issueStatus === "blocked" &&
+    allowsIssueInteractionWake(input.contextSnapshot) &&
+    !hasExplicitResumeIntent(input.contextSnapshot)
+  );
+}
+
 async function listUnresolvedBlockerSummaries(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
@@ -1682,7 +1697,6 @@ function shouldAutoCheckoutIssueForWake(input: {
   if (
     issueStatus !== "todo" &&
     issueStatus !== "backlog" &&
-    issueStatus !== "blocked" &&
     issueStatus !== "in_progress"
   ) {
     return false;
@@ -2026,6 +2040,7 @@ async function buildPaperclipWakePayload(input: {
     interactionKind: readNonEmptyString(input.contextSnapshot.interactionKind),
     interactionStatus: readNonEmptyString(input.contextSnapshot.interactionStatus),
     checkedOutByHarness: input.contextSnapshot[PAPERCLIP_HARNESS_CHECKOUT_KEY] === true,
+    blockedIssueInteraction: input.contextSnapshot.blockedIssueInteraction === true,
     dependencyBlockedInteraction: input.contextSnapshot.dependencyBlockedInteraction === true,
     treeHoldInteraction: input.contextSnapshot.treeHoldInteraction === true,
     activeTreeHold: parseObject(input.contextSnapshot.activeTreeHold),
@@ -5886,24 +5901,36 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const claimedIssueId = readNonEmptyString(parseObject(claimed.contextSnapshot).issueId);
     if (claimedIssueId) {
       const claimedAgent = await getAgent(claimed.agentId);
-      await db
-        .update(issues)
-        .set({
-          executionRunId: claimed.id,
-          executionAgentNameKey: normalizeAgentNameKey(claimedAgent?.name),
-          executionLockedAt: claimedAt,
-          updatedAt: claimedAt,
+      const claimedIssue = await db
+        .select({ status: issues.status })
+        .from(issues)
+        .where(and(eq(issues.id, claimedIssueId), eq(issues.companyId, claimed.companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (
+        !isBlockedIssueInteractionOnlyWake({
+          contextSnapshot: parseObject(claimed.contextSnapshot),
+          issueStatus: claimedIssue?.status,
         })
-        .where(
-          and(
-            eq(issues.id, claimedIssueId),
-            eq(issues.companyId, claimed.companyId),
-            // Mention/context runs can touch an issue, but only the current assignee
-            // owns the issue execution lock shown as the active run.
-            eq(issues.assigneeAgentId, claimed.agentId),
-            or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
-          ),
-        );
+      ) {
+        await db
+          .update(issues)
+          .set({
+            executionRunId: claimed.id,
+            executionAgentNameKey: normalizeAgentNameKey(claimedAgent?.name),
+            executionLockedAt: claimedAt,
+            updatedAt: claimedAt,
+          })
+          .where(
+            and(
+              eq(issues.id, claimedIssueId),
+              eq(issues.companyId, claimed.companyId),
+              // Mention/context runs can touch an issue, but only the current assignee
+              // owns the issue execution lock shown as the active run.
+              eq(issues.assigneeAgentId, claimed.agentId),
+              or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
+            ),
+          );
+      }
     }
 
     return claimed;
@@ -8883,6 +8910,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           [issue.id],
           tx,
         ).then((rows) => rows.get(issue.id) ?? null);
+        const blockedIssueInteractionWake = isBlockedIssueInteractionOnlyWake({
+          contextSnapshot: enrichedContextSnapshot,
+          issueStatus: issue.status,
+        });
+        if (blockedIssueInteractionWake) {
+          enrichedContextSnapshot.blockedIssueInteraction = true;
+        }
 
         // Blocked descendants should stay idle until the final blocker resolves.
         // Human comment/mention wakes are the exception: they may run in a
