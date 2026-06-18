@@ -76,6 +76,40 @@ const ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE = 500;
 export const MAX_CHILD_ISSUES_CREATED_BY_HELPER = 25;
 const MAX_CHILD_COMPLETION_SUMMARIES = 20;
 const CHILD_COMPLETION_SUMMARY_BODY_MAX_CHARS = 500;
+const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
+
+function readNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function hasCheckoutWakeComment(contextSnapshot: Record<string, unknown>) {
+  if (readNonEmptyString(contextSnapshot.wakeCommentId) || readNonEmptyString(contextSnapshot.commentId)) {
+    return true;
+  }
+  const wakeCommentIds = contextSnapshot[WAKE_COMMENT_IDS_KEY];
+  return Array.isArray(wakeCommentIds) && wakeCommentIds.some((value) => readNonEmptyString(value));
+}
+
+async function isBlockedIssueInteractionCheckout(input: {
+  db: Db;
+  checkoutRunId: string | null;
+  issueStatus: string;
+}) {
+  if (input.issueStatus !== "blocked" || !input.checkoutRunId) return false;
+  const run = await input.db
+    .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, input.checkoutRunId))
+    .then((rows) => rows[0] ?? null);
+  const context = parseObject(run?.contextSnapshot);
+  if (context.resumeIntent === true || context.followUpRequested === true) return false;
+  const wakeReason = readNonEmptyString(context.wakeReason);
+  return (
+    (wakeReason === "issue_commented" || wakeReason === "issue_comment_mentioned") &&
+    hasCheckoutWakeComment(context)
+  );
+}
+
 function assertTransition(from: string, to: string) {
   if (from === to) return;
   if (!ALL_ISSUE_STATUSES.includes(to)) {
@@ -3376,12 +3410,19 @@ export function issueService(db: Db) {
 
     checkout: async (id: string, agentId: string, expectedStatuses: string[], checkoutRunId: string | null) => {
       const issueCompany = await db
-        .select({ companyId: issues.companyId })
+        .select({ companyId: issues.companyId, status: issues.status })
         .from(issues)
         .where(eq(issues.id, id))
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
       await assertAssignableAgent(issueCompany.companyId, agentId);
+      if (await isBlockedIssueInteractionCheckout({ db, checkoutRunId, issueStatus: issueCompany.status })) {
+        throw unprocessable("Blocked issue comment wakes cannot checkout without explicit resume intent", {
+          issueId: id,
+          status: issueCompany.status,
+          checkoutRunId,
+        });
+      }
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);

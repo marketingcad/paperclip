@@ -2004,6 +2004,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -2254,6 +2255,84 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await expect(
       svc.checkout(blockedId, assigneeAgentId, ["todo", "blocked"], null),
     ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("rejects checkout from plain blocked issue comment wakes", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      invocationSource: "automation",
+      triggerDetail: "system",
+      contextSnapshot: {
+        issueId,
+        commentId: randomUUID(),
+        wakeCommentId: randomUUID(),
+        wakeReason: "issue_commented",
+      },
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Blocked",
+      status: "blocked",
+      priority: "medium",
+      assigneeAgentId,
+    });
+
+    await expect(
+      svc.checkout(issueId, assigneeAgentId, ["todo", "blocked"], runId),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: "Blocked issue comment wakes cannot checkout without explicit resume intent",
+    });
+
+    const explicitResumeRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: explicitResumeRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      invocationSource: "automation",
+      triggerDetail: "system",
+      contextSnapshot: {
+        issueId,
+        commentId: randomUUID(),
+        wakeCommentId: randomUUID(),
+        wakeReason: "issue_commented",
+        resumeIntent: true,
+        followUpRequested: true,
+      },
+    });
+    await expect(
+      svc.checkout(issueId, assigneeAgentId, ["todo", "blocked"], explicitResumeRunId),
+    ).resolves.toMatchObject({
+      id: issueId,
+      status: "in_progress",
+      checkoutRunId: explicitResumeRunId,
+    });
   });
 
   it("wakes parents only when all direct children are terminal", async () => {

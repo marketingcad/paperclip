@@ -606,6 +606,32 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("PAP-1723 Finish blocker (todo)");
   });
 
+  it("renders blocked issue interaction guidance", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_commented",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-333",
+        title: "Mount external folder",
+        status: "blocked",
+      },
+      blockedIssueInteraction: true,
+      commentWindow: {
+        requestedCount: 1,
+        includedCount: 1,
+        missingCount: 0,
+      },
+      commentIds: ["comment-1"],
+      latestCommentId: "comment-1",
+      comments: [{ id: "comment-1", body: "Still blocked." }],
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("blocked issue interaction: yes");
+    expect(prompt).toContain("do not checkout this issue unless explicit resume or checkout was requested");
+    expect(prompt).toContain("do not treat blocked deliverable work as unblocked");
+  });
+
   it("renders loose review request instructions for execution handoffs", () => {
     const prompt = renderPaperclipWakePrompt({
       reason: "execution_review_requested",
